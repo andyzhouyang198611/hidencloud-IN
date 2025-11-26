@@ -3,8 +3,6 @@ import time
 import sys
 import random
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-# 引入反指纹插件
-from playwright_stealth import stealth_sync
 
 # --- 全局配置 ---
 HIDENCLOUD_COOKIE = os.environ.get('HIDENCLOUD_COOKIE')
@@ -19,23 +17,50 @@ COOKIE_NAME = "remember_web_59ba36addc2b2f9401580f014c7f58ea4e30989d"
 def log(message):
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
 
+def manual_stealth(page):
+    """
+    手动注入反指纹脚本，不依赖外部库。
+    移除 navigator.webdriver 标记，防止被 Cloudflare 识别为机器人。
+    """
+    page.add_init_script("""
+        // 1. 覆盖 webdriver 属性
+        Object.defineProperty(navigator, 'webdriver', {
+            get: () => undefined
+        });
+
+        // 2. 伪造 Chrome 运行环境
+        window.chrome = {
+            runtime: {}
+        };
+
+        // 3. 伪造插件列表 (Headless 模式下通常为空)
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => [1, 2, 3, 4, 5]
+        });
+
+        // 4. 伪造语言设置
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['en-US', 'en']
+        });
+    """)
+
 def handle_cloudflare(page):
     """
-    终极版 Cloudflare 处理逻辑：
-    结合了 XVFB 环境，我们可以更自信地等待验证通过。
+    XVFB 环境下的 Cloudflare 处理逻辑。
     """
     iframe_selector = 'iframe[src*="challenges.cloudflare.com"]'
     
-    # 检测是否存在验证框
+    # 快速检查
     if page.locator(iframe_selector).count() == 0:
         return True
 
     log("⚠️ 检测到 Cloudflare 验证，开始对抗...")
     start_time = time.time()
     
+    # 最多尝试 45 秒
     while time.time() - start_time < 45:
         try:
-            # 再次检查是否已经通过（iframe 消失）
+            # 检查是否通过
             if page.locator(iframe_selector).count() == 0:
                 log("✅ Cloudflare 验证已通过！")
                 return True
@@ -43,41 +68,40 @@ def handle_cloudflare(page):
             frame = page.frame_locator(iframe_selector)
             checkbox = frame.locator('input[type="checkbox"]')
             
-            # 如果复选框可见，则执行拟人化点击
             if checkbox.is_visible():
                 box = checkbox.bounding_box()
                 if box:
                     log("定位到验证框，执行拟人移动点击...")
-                    # 移动鼠标稍微随机一点
-                    x = box['x'] + box['width'] / 2 + random.uniform(-10, 10)
-                    y = box['y'] + box['height'] / 2 + random.uniform(-10, 10)
-                    page.mouse.move(x, y, steps=20)
-                    time.sleep(random.uniform(0.2, 0.5))
+                    # 模拟人类鼠标抖动
+                    x = box['x'] + box['width'] / 2 + random.uniform(-5, 5)
+                    y = box['y'] + box['height'] / 2 + random.uniform(-5, 5)
+                    page.mouse.move(x, y, steps=10)
+                    time.sleep(random.uniform(0.1, 0.3))
                     page.mouse.down()
                     time.sleep(random.uniform(0.1, 0.2))
                     page.mouse.up()
                 else:
                     checkbox.click()
                 
-                # 点击后，给一点时间让它转圈
-                log("已点击，等待验证反应...")
+                log("已点击，等待响应...")
                 time.sleep(5)
             else:
-                # 有时候复选框不可见是在加载中，或者已经是在转圈了
-                log("验证框存在但复选框不可见，可能正在验证中，等待...")
-                time.sleep(2)
+                # 验证框存在但复选框还没出来，可能在加载
+                time.sleep(1)
 
         except Exception as e:
-            pass # 忽略过程中的小错误，持续尝试
+            # 忽略过程错误
+            pass
             
         time.sleep(1)
 
-    log("❌ Cloudflare 验证长时间未通过。")
+    log("❌ Cloudflare 验证超时。")
     return False
 
 def login(page):
     log("开始登录流程...")
     
+    # Cookie 登录尝试
     if HIDENCLOUD_COOKIE:
         log("尝试 Cookie 登录...")
         try:
@@ -95,8 +119,8 @@ def login(page):
                 return True
             log("Cookie 失效，转为密码登录。")
             page.context.clear_cookies()
-        except:
-            pass
+        except Exception as e:
+            log(f"Cookie 登录出错: {e}")
 
     if not HIDENCLOUD_EMAIL or not HIDENCLOUD_PASSWORD:
         return False
@@ -112,8 +136,7 @@ def login(page):
         handle_cloudflare(page)
         page.click('button[type="submit"]:has-text("Sign in to your account")')
         
-        # 登录后可能强制验证
-        time.sleep(2)
+        time.sleep(3)
         handle_cloudflare(page)
         
         page.wait_for_url(f"{BASE_URL}/dashboard", timeout=60000)
@@ -134,47 +157,45 @@ def renew_service(page):
 
         log("点击 'Renew'...")
         page.locator('button:has-text("Renew")').click()
-        time.sleep(2) # 稍作等待
+        time.sleep(2)
 
         log("点击 'Create Invoice'...")
-        # 这里是关键点，点击后 Cloudflare 可能会拦截
         create_btn = page.locator('button:has-text("Create Invoice")')
         create_btn.wait_for(state="visible", timeout=10000)
+        
+        # 预判拦截
+        handle_cloudflare(page)
         create_btn.click()
         
-        # --- 监控发票生成 & 拦截 ---
-        log("等待发票生成 (含 Cloudflare 监控)...")
+        log("等待发票生成...")
         new_invoice_url = None
         
-        # 定义一个简单的重试循环
+        # 等待循环
         for i in range(40):
-            # 1. 检查 URL 是否变化（成功跳转）
             if "/payment/invoice/" in page.url:
                 new_invoice_url = page.url
                 log(f"🎉 页面跳转成功: {new_invoice_url}")
                 break
             
-            # 2. 检查是否出现 Cloudflare 拦截
-            # 在点击 Create Invoice 后，如果页面没动，很可能弹出了验证码
+            # 持续监控 Cloudflare
             handle_cloudflare(page)
-            
             time.sleep(1)
             
         if not new_invoice_url:
-            log("❌ 未能获取发票 URL，可能被拦截或超时。")
+            log("❌ 未能获取发票 URL，截图保存。")
             page.screenshot(path="renew_stuck.png")
             return False
 
-        # 如果 URL 变了但没跳转（极少情况），手动跳
         if page.url != new_invoice_url:
             page.goto(new_invoice_url)
 
         log("点击 'Pay'...")
+        # 确保 Pay 按钮可见再点击
         pay_btn = page.locator('a:has-text("Pay"):visible, button:has-text("Pay"):visible').first
         pay_btn.wait_for(state="visible", timeout=30000)
         pay_btn.click()
         
-        log("✅ 续费动作完成。")
+        log("✅ 续费动作触发完成。")
         time.sleep(5)
         return True
 
@@ -190,16 +211,16 @@ def main():
     with sync_playwright() as p:
         try:
             log("启动浏览器 (Headless=False + XVFB)...")
-            # 关键：这里设置为 headless=False，因为我们有 XVFB
+            # 必须使用 headless=False 以配合 XVFB
             browser = p.chromium.launch(
-                headless=False, 
+                headless=False,
                 args=['--no-sandbox', '--disable-blink-features=AutomationControlled']
             )
             context = browser.new_context(viewport={'width': 1280, 'height': 960})
             page = context.new_page()
             
-            # 激活隐身模式插件
-            stealth_sync(page)
+            # 注入隐身代码
+            manual_stealth(page)
 
             if not login(page):
                 sys.exit(1)
@@ -210,6 +231,8 @@ def main():
             log("🎉 任务全部完成！")
         except Exception as e:
             log(f"💥 严重错误: {e}")
+            if 'page' in locals() and page:
+                page.screenshot(path="fatal_error.png")
             sys.exit(1)
         finally:
             if 'browser' in locals() and browser:
