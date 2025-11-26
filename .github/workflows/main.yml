@@ -4,7 +4,7 @@ name: HidenCloud Auto Renew
 on:
   workflow_dispatch:
   schedule:
-    - cron: '33 16 * * 3'
+    - cron: '33 4 * * 3'
 
 permissions:
   contents: write # 授予工作流写入仓库内容的权限
