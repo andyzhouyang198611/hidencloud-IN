@@ -7,7 +7,7 @@ on:
     - cron: '33 4 * * 3'
 
 permissions:
-  contents: write # 授予工作流写入仓库内容的权限
+  contents: write
 
 jobs:
   renew-job:
@@ -23,25 +23,31 @@ jobs:
         with:
           python-version: '3.11'
 
-      # --- 修改点在这里 ---
+      # --- 关键修改：安装 XVFB 和 Stealth ---
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+
       - name: Install Playwright and dependencies
         run: |
-          pip install playwright
+          pip install playwright playwright-stealth
           python -m playwright install --with-deps chromium
 
-      - name: Run Renew Script
+      - name: Run Renew Script with XVFB
         env:
           HIDENCLOUD_COOKIE: ${{ secrets.HIDENCLOUD_COOKIE }}
           HIDENCLOUD_EMAIL: ${{ secrets.HIDENCLOUD_EMAIL }}
           HIDENCLOUD_PASSWORD: ${{ secrets.HIDENCLOUD_PASSWORD }}
-        run: python -u renew_service.py
+        # 使用 xvfb-run 模拟一个 1280x960 的显示器环境运行脚本
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1280x960x24" python -u renew_service.py
 
-      - name: Upload error artifacts # 步骤5: 如果脚本运行失败，上传截图用于调试
-        if: failure() # 仅在上一步失败时运行
+      - name: Upload error artifacts
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: error-screenshots # 上传后的文件包名称
-          path: "*.png" # 上传所有以 .png 结尾的文件
+          name: error-screenshots
+          path: "*.png"
 
       - name: Commit time.txt to repo
         env:
@@ -49,17 +55,12 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # 如果 time.txt 不存在，说明是第一次运行
           if [ ! -f time.txt ]; then
             echo "首次生成时间：$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
           else
             echo "$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
           fi
-
           git add time.txt
-
-          # 如果有更改再提交
           if git diff --cached --quiet; then
             echo "无变化，无需提交"
           else
