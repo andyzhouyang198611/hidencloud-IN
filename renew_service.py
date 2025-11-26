@@ -2,7 +2,6 @@ import os
 import time
 import sys
 import random
-import math
 from playwright.sync_api import sync_playwright
 
 # --- 全局配置 ---
@@ -18,115 +17,76 @@ COOKIE_NAME = "remember_web_59ba36addc2b2f9401580f014c7f58ea4e30989d"
 def log(message):
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
 
-# --- 强力反指纹脚本 ---
-# 这段 JS 会在页面加载前注入，伪装浏览器特征
-STRONG_STEALTH_JS = """
-    // 1. 移除自动化标记
+# 基础反指纹 JS (去掉了容易出错的复杂部分)
+STEALTH_JS = """
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    
-    // 2. 伪造 Chrome 对象
     window.chrome = { runtime: {} };
-    
-    // 3. 伪造插件列表
-    Object.defineProperty(navigator, 'plugins', {
-        get: () => [
-            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-            { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
-            { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
-        ]
-    });
-    
-    // 4. 伪造语言
     Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-    
-    // 5. 欺骗权限查询 (Cloudflare 常用检测手段)
-    const originalQuery = window.navigator.permissions.query;
-    window.navigator.permissions.query = (parameters) => (
-        parameters.name === 'notifications' ?
-        Promise.resolve({ state: Notification.permission }) :
-        originalQuery(parameters)
-    );
+    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
 """
-
-def human_mouse_move(page, start_x, start_y, end_x, end_y, steps=25):
-    """
-    模拟人类鼠标移动轨迹（贝塞尔曲线+随机抖动）
-    """
-    for i in range(steps + 1):
-        t = i / steps
-        # 简单的线性插值加上正弦波抖动
-        x = start_x + (end_x - start_x) * t + random.uniform(-2, 2) * math.sin(t * math.pi)
-        y = start_y + (end_y - start_y) * t + random.uniform(-2, 2) * math.sin(t * math.pi)
-        page.mouse.move(x, y)
-        time.sleep(random.uniform(0.005, 0.015))
 
 def handle_cloudflare(page):
     """
-    终极版 Cloudflare 处理逻辑
+    策略：如果遇到验证码，尝试点击。如果卡住超过 10 秒，直接刷新页面重试。
     """
     iframe_selector = 'iframe[src*="challenges.cloudflare.com"]'
     
-    # 快速检查，如果没有验证框直接返回
-    if page.locator(iframe_selector).count() == 0:
-        return True
+    # 总共尝试 120 秒
+    start_time = time.time()
+    while time.time() - start_time < 120:
+        
+        # 1. 检查验证框是否存在
+        if page.locator(iframe_selector).count() == 0:
+            return True # 验证框不存在，说明已通过或无需验证
 
-    log("⚠️ 遇到 Cloudflare 验证，启动对抗模式...")
-    start_wait = time.time()
-    
-    # 循环检测直到验证通过或超时 (60秒)
-    while time.time() - start_wait < 60:
+        log("⚠️ 检测到 Cloudflare 验证...")
+
         try:
-            # 1. 检查是否已通过 (iframe 消失)
-            if page.locator(iframe_selector).count() == 0:
-                log("✅ Cloudflare 验证已通过！")
-                return True
-
             frame = page.frame_locator(iframe_selector)
             checkbox = frame.locator('input[type="checkbox"]')
+            spinner = frame.locator('#spinner') # 加载圈
             
-            # 2. 如果复选框可见，执行拟人点击
+            # 如果复选框可见，点击它
             if checkbox.is_visible():
-                box = checkbox.bounding_box()
-                if box:
-                    log("定位到验证框，执行拟人轨迹移动...")
-                    # 获取当前鼠标位置 (Playwright 没直接提供，假设从左上角开始)
-                    # 移动到目标区域
-                    target_x = box['x'] + box['width'] / 2 + random.uniform(-5, 5)
-                    target_y = box['y'] + box['height'] / 2 + random.uniform(-5, 5)
-                    
-                    # 移动鼠标
-                    page.mouse.move(target_x, target_y, steps=20)
-                    time.sleep(random.uniform(0.2, 0.5))
-                    
-                    log("点击验证...")
-                    page.mouse.down()
-                    time.sleep(random.uniform(0.05, 0.15)) # 短暂按压
-                    page.mouse.up()
-                    
-                    log("点击完成，等待跳转或刷新...")
-                    # 点击后给足时间等待
-                    time.sleep(8) 
-                else:
-                    # 获取不到坐标时的备选方案
-                    checkbox.click()
-            else:
-                # 验证框存在但复选框不可见 (可能在加载或已经在转圈)
-                # 检查是否是"Verify you are human"文本，有时候是点击文字
-                pass
+                log("点击验证复选框...")
+                # 稍微随机延迟
+                time.sleep(random.uniform(0.5, 1.5))
+                checkbox.click()
+                log("已点击，等待响应...")
+                
+                # 点击后等待 8 秒
+                for _ in range(8):
+                    time.sleep(1)
+                    if page.locator(iframe_selector).count() == 0:
+                        log("✅ 验证通过！")
+                        return True
+            
+            # 如果此时验证框还在，说明可能卡住了 (Validating security... 转圈不消失)
+            log("⏳ 验证似乎卡住了，准备刷新页面重试...")
+            
+            # 截图记录一下卡住的状态
+            # page.screenshot(path=f"cf_stuck_{int(time.time())}.png")
+            
+            # 刷新页面！这是破局的关键
+            page.reload(wait_until="domcontentloaded")
+            log("🔄 页面已刷新，等待重新加载...")
+            
+            # 重新注入 JS (因为刷新后失效)
+            page.add_init_script(STEALTH_JS)
+            
+            # 等待页面稳定，进入下一次循环
+            time.sleep(5)
 
         except Exception as e:
-            # 忽略过程中的报错，继续重试
-            pass
+            log(f"处理验证时发生错误: {e}")
+            time.sleep(2)
             
-        time.sleep(1)
-
-    log("❌ Cloudflare 验证长时间未消除，可能已卡死。")
+    log("❌ Cloudflare 验证最终超时。")
     return False
 
 def login(page):
     log("开始登录流程...")
     
-    # --- Cookie 登录 ---
     if HIDENCLOUD_COOKIE:
         log("尝试 Cookie 登录...")
         try:
@@ -138,18 +98,16 @@ def login(page):
             }])
             page.goto(SERVICE_URL, wait_until="domcontentloaded", timeout=60000)
             
-            # 页面加载后立即检查盾
+            # 检查盾
             handle_cloudflare(page)
             
             if "auth/login" not in page.url:
                 log("✅ Cookie 登录成功！")
                 return True
             log("Cookie 失效。")
-            page.context.clear_cookies()
-        except Exception:
+        except:
             pass
 
-    # --- 账号密码登录 ---
     if not HIDENCLOUD_EMAIL or not HIDENCLOUD_PASSWORD:
         return False
 
@@ -160,17 +118,11 @@ def login(page):
         
         page.fill('input[name="email"]', HIDENCLOUD_EMAIL)
         page.fill('input[name="password"]', HIDENCLOUD_PASSWORD)
-        time.sleep(1)
         
         handle_cloudflare(page)
+        page.click('button[type="submit"]:has-text("Sign in to your account")')
         
-        # 查找登录按钮
-        login_btn = page.locator('button[type="submit"]')
-        if login_btn.is_visible():
-            login_btn.click()
-        
-        # 登录提交后通常会跳盾
-        log("登录提交，等待验证...")
+        # 登录后等待
         time.sleep(3)
         handle_cloudflare(page)
         
@@ -188,77 +140,73 @@ def renew_service(page):
         if page.url != SERVICE_URL:
             page.goto(SERVICE_URL, wait_until="domcontentloaded", timeout=60000)
         
-        handle_cloudflare(page)
+        if not handle_cloudflare(page):
+             raise Exception("Cloudflare 验证未通过")
 
-        # 点击 Renew
-        log("查找并点击 'Renew'...")
+        log("点击 'Renew'...")
         page.locator('button:has-text("Renew")').click()
         time.sleep(2)
 
-        # 点击 Create Invoice (这里是最容易出盾的地方)
-        log("准备点击 'Create Invoice'...")
+        log("点击 'Create Invoice'...")
         create_btn = page.locator('button:has-text("Create Invoice")')
         create_btn.wait_for(state="visible", timeout=10000)
         
-        # 预先检查一次
+        # 预先处理可能弹出的验证
         handle_cloudflare(page)
         
-        # 点击
         create_btn.click()
         log("已点击 'Create Invoice'，开始监控...")
 
-        # --- 监控阶段 ---
+        # --- 监控与刷新逻辑 ---
         new_invoice_url = None
         
-        # 循环 60 次，每次约 1-2 秒，总共等待约 1-2 分钟
-        for i in range(60):
-            # 1. 成功跳转检测
+        # 循环检查
+        for i in range(20): # 约 40-60秒
+            # 1. 成功跳转?
             if "/payment/invoice/" in page.url:
                 new_invoice_url = page.url
-                log(f"🎉 页面跳转成功: {new_invoice_url}")
+                log(f"🎉 页面已跳转: {new_invoice_url}")
                 break
             
-            # 2. Cloudflare 检测与处理
-            # 即使刚才没跳转，也有可能是盾出来了挡住了跳转
-            handle_cloudflare(page)
+            # 2. 检查是否有盾，如果有盾且卡住，handle_cloudflare 内部会刷新
+            # 注意：如果在这里刷新了，意味着页面会重载，可能需要重新点击按钮吗？
+            # 这是一个风险点。但在发票生成页，通常刷新后会停留在当前页或跳转。
+            # 如果是在点击按钮后立即出盾，刷新可能会导致按钮点击失效，需要重新点。
+            # 为了简单起见，这里我们只做简单的盾处理，不强制刷新，除非万不得已。
             
-            # 3. 检查是否还在原页面但有 Pay 按钮 (极少见)
-            if page.locator('a:has-text("Pay")').count() > 0:
-                log("检测到页面上已存在 Pay 按钮。")
-                break
+            iframe_count = page.locator('iframe[src*="challenges.cloudflare.com"]').count()
+            if iframe_count > 0:
+                log("⚠️ 生成发票时遇到拦截，尝试处理...")
+                handle_cloudflare(page) # 这里面有刷新逻辑
+                
+                # 如果刷新了，页面状态变了，我们需要检查是否还在原来的页面
+                if page.url == SERVICE_URL:
+                    log("🔄 页面刷新后回到了服务页，尝试重新点击 'Create Invoice'...")
+                    if create_btn.is_visible():
+                        create_btn.click()
+                elif "/payment/invoice/" in page.url:
+                    new_invoice_url = page.url
+                    break
 
-            time.sleep(1)
-            
-        # 如果循环结束还没 URL，截图
+            time.sleep(2)
+
         if not new_invoice_url and "/payment/invoice/" not in page.url:
-             # 再给最后一次机会检查当前 URL
-            if "/payment/invoice/" in page.url:
-                 new_invoice_url = page.url
-            else:
-                log("❌ 超时：未能进入发票页面。")
-                page.screenshot(path="renew_stuck.png")
-                return False
+            log("❌ 未能进入发票页面。")
+            page.screenshot(path="renew_stuck.png")
+            return False
 
-        # 确保我们在发票页
+        # 确保在发票页
         if new_invoice_url and page.url != new_invoice_url:
             page.goto(new_invoice_url)
 
-        # 再次检查盾 (发票页也可能有)
-        handle_cloudflare(page)
+        handle_cloudflare(page) # 发票页再查一次
 
         log("查找 'Pay' 按钮...")
         pay_btn = page.locator('a:has-text("Pay"):visible, button:has-text("Pay"):visible').first
         pay_btn.wait_for(state="visible", timeout=30000)
+        pay_btn.click()
         
-        # 拟人点击 Pay
-        box = pay_btn.bounding_box()
-        if box:
-            page.mouse.move(box['x'] + 10, box['y'] + 10, steps=10)
-            page.mouse.click(box['x'] + 10, box['y'] + 10)
-        else:
-            pay_btn.click()
-            
-        log("✅ 'Pay' 按钮已点击，续费流程结束。")
+        log("✅ 'Pay' 按钮已点击。")
         time.sleep(5)
         return True
 
@@ -273,27 +221,22 @@ def main():
 
     with sync_playwright() as p:
         try:
-            log("启动浏览器 (加强版)...")
-            # 启动参数优化
+            log("启动浏览器...")
+            # 移除所有自定义 User-Agent，使用默认值以避免指纹冲突
             browser = p.chromium.launch(
                 headless=False, # 配合 XVFB
                 args=[
                     '--no-sandbox',
                     '--disable-blink-features=AutomationControlled',
-                    '--start-maximized', # 最大化窗口
                     '--disable-infobars',
-                    '--window-size=1920,1080' # 强制窗口大小
+                    '--window-size=1920,1080'
                 ]
             )
-            context = browser.new_context(
-                viewport={'width': 1920, 'height': 1080},
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            )
-            
+            # 不设置 viewport 和 user_agent，让其自动适配
+            context = browser.new_context(viewport={'width': 1920, 'height': 1080})
             page = context.new_page()
             
-            # 注入反指纹 JS
-            page.add_init_script(STRONG_STEALTH_JS)
+            page.add_init_script(STEALTH_JS)
 
             if not login(page):
                 sys.exit(1)
