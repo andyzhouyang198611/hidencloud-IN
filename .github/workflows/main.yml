@@ -23,15 +23,16 @@ jobs:
         with:
           python-version: '3.11'
 
-      # --- 关键修改：安装 XVFB 和 Stealth ---
+      # 安装 XVFB (虚拟显示器)
       - name: Install System Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb
 
+      # 移除 playwright-stealth，只安装 playwright
       - name: Install Playwright and dependencies
         run: |
-          pip install playwright playwright-stealth
+          pip install playwright
           python -m playwright install --with-deps chromium
 
       - name: Run Renew Script with XVFB
@@ -39,7 +40,7 @@ jobs:
           HIDENCLOUD_COOKIE: ${{ secrets.HIDENCLOUD_COOKIE }}
           HIDENCLOUD_EMAIL: ${{ secrets.HIDENCLOUD_EMAIL }}
           HIDENCLOUD_PASSWORD: ${{ secrets.HIDENCLOUD_PASSWORD }}
-        # 使用 xvfb-run 模拟一个 1280x960 的显示器环境运行脚本
+        # 使用 xvfb-run 模拟真实显示器运行，绕过“无头”检测
         run: xvfb-run --auto-servernum --server-args="-screen 0 1280x960x24" python -u renew_service.py
 
       - name: Upload error artifacts
