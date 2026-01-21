@@ -79,37 +79,6 @@ def login(page):
         except:
             pass
 
-    # 2. 账号密码登录
-    if not HIDENCLOUD_EMAIL or not HIDENCLOUD_PASSWORD:
-        return False
-
-    log("尝试账号密码登录...")
-    try:
-        page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
-        handle_cloudflare(page)
-        
-        page.fill('input[name="email"]', HIDENCLOUD_EMAIL)
-        page.fill('input[name="password"]', HIDENCLOUD_PASSWORD)
-        time.sleep(0.5)
-        handle_cloudflare(page)
-        
-        page.click('button[type="submit"]')
-        time.sleep(3)
-        handle_cloudflare(page)
-        
-        page.wait_for_url(f"{BASE_URL}/*", timeout=30000)
-        
-        if "auth/login" in page.url:
-             log("❌ 登录失败。")
-             return False
-
-        log("✅ 账号密码登录成功！")
-        return True
-    except Exception as e:
-        log(f"❌ 登录异常: {e}")
-        page.screenshot(path="login_fail.png")
-        return False
-
 def renew_service(page):
     try:
         log("进入续费流程...")
